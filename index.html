@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mini Rogue Game</title>
+  <style>
+    /*
+      [게임 화면 기본 레이아웃]
+      - #game-canvas: 던전 맵 및 캐릭터, 몬스터, 아이템 표시용 캔버스
+      - #info-panel: 플레이어 상태, 메시지, 조작법 안내 등 표시
+      - #log-panel: 게임 로그(이벤트, 전투 등) 표시
+    */
+    body {
+      background: #181c1b;
+      color: #e0e0e0;
+      font-family: 'Consolas', 'monospace', Arial, sans-serif;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+    h1 { margin: 18px 0 8px 0; }
+    #game-canvas {
+      background: #232927;
+      border: 2px solid #444;
+      border-radius: 8px;
+      margin-bottom: 12px;
+      display: block;
+    }
+    #info-panel {
+      background: #232927;
+      border-radius: 8px;
+      padding: 10px 18px;
+      margin-bottom: 10px;
+      min-width: 320px;
+      font-size: 1.08rem;
+    }
+    #log-panel {
+      background: #1a1e1d;
+      border-radius: 8px;
+      padding: 8px 14px;
+      min-width: 320px;
+      max-height: 120px;
+      overflow-y: auto;
+      font-size: 0.98rem;
+      margin-bottom: 18px;
+    }
+    .controls {
+      color: #b5e0ff;
+      font-size: 0.98rem;
+      margin-top: 6px;
+    }
+    .dead {
+      color: #f76c6c;
+      font-weight: bold;
+    }
+    .win {
+      color: #ffe066;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <h1>Mini Rogue Game</h1>
+  <canvas id="game-canvas" width="600" height="420"></canvas>
+  <div id="info-panel">
+    <span id="player-info"></span>
+    <div class="controls">
+      이동: 방향키 또는 WASD &nbsp;|&nbsp; 목표: 계단(>) 도달<br>
+      <b>@</b>: 플레이어, <b>M</b>: 근접몬스터, <b>A</b>: 원거리몬스터, <b>!</b>: HP포션<br>
+      <b>#</b>: 벽, <b>·</b>: 바닥(돌/흙/잔디), <b>~</b>: 물, <b>></b>: 계단 | 시야: <span id="vision-range"></span>칸
+    </div>
+  </div>
+  <div id="log-panel"></div>
+  <script>
+    /*
+      [전체 구조 설계]
+      1. 맵(Map):
+        - 2차원 배열(타일 기반), 벽/바닥/문/계단 등
+        - 랜덤 던전 생성(방, 복도)
+      2. 플레이어(Player):
+        - 위치(x, y), HP, 공격력, 인벤토리(아이템)
+        - 키보드 입력(방향키/wasd)으로 이동
+      3. 몬스터(Monster):
+        - 위치(x, y), HP, 공격력, 간단한 AI(플레이어 추적/랜덤 이동)
+      4. 아이템(Item):
+        - 맵에 랜덤 배치, 획득/사용 가능(HP 회복, 공격력 증가 등)
+      5. 전투(Combat):
+        - 플레이어와 몬스터가 같은 칸에 있으면 전투 발생
+      6. 게임 오버/승리:
+        - HP 0이 되면 게임 오버, 계단 도달 시 승리
+      7. UI:
+        - 캔버스에 맵/캐릭터/몬스터/아이템 그리기
+        - info-panel: 상태/조작법, log-panel: 이벤트 로그
+      8. 엔진/프레임워크:
+        - rot.js(경량 로그라이크 엔진) 사용 가능(필요시 CDN)
+    */
+    // --- 게임 상수 및 상태 ---
+    const MAP_W = 40, MAP_H = 28, TILE = 15;
+    const VISION_RANGE = 6; // 시야 범위
+    let map = [];
+    let floorTypes = []; // 바닥 타일 종류 저장
+    let visited = []; // 플레이어가 방문한 곳
+    let player = { x: 0, y: 0, hp: 12, atk: 3, maxHp: 12, alive: true };
+    let stairs = { x: 0, y: 0 };
+    let monsters = [];
+    let items = [];
+    let logLines = [];
+    let gameOver = false;
+
+    // --- 로그 함수 ---
+    function log(msg, cls) {
+      logLines.push(`<span class='${cls||''}'>${msg}</span>`);
+      if (logLines.length > 7) logLines.shift();
+      document.getElementById('log-panel').innerHTML = logLines.map(l => `<div>${l}</div>`).join('');
+    }
+
+    // --- 시야 계산 함수 ---
+    function isInVision(x, y) {
+      let dx = Math.abs(x - player.x);
+      let dy = Math.abs(y - player.y);
+      return dx <= VISION_RANGE && dy <= VISION_RANGE;
+    }
+
+    // --- 순수 JavaScript 던전 생성 ---
+    function generateMap() {
+      // 1. 전체를 벽으로 초기화
+      map = [];
+      floorTypes = [];
+      visited = [];
+      for (let y = 0; y < MAP_H; y++) {
+        map[y] = Array(MAP_W).fill('#');
+        floorTypes[y] = Array(MAP_W).fill('wall');
+        visited[y] = Array(MAP_W).fill(false);
+      }
+      
+      // 2. 랜덤 방 생성
+      let rooms = [];
+      for (let i = 0; i < 8; i++) {
+        let tries = 0;
+        while (tries < 50) {
+          let w = 6 + Math.floor(Math.random() * 6); // 6-11
+          let h = 5 + Math.floor(Math.random() * 4); // 5-8
+          let x = 2 + Math.floor(Math.random() * (MAP_W - w - 4));
+          let y = 2 + Math.floor(Math.random() * (MAP_H - h - 4));
+          
+          // 다른 방과 겹치지 않는지 체크
+          let overlap = false;
+          for (let r of rooms) {
+            if (x < r.x + r.w + 1 && x + w + 1 > r.x &&
+                y < r.y + r.h + 1 && y + h + 1 > r.y) {
+              overlap = true;
+              break;
+            }
+          }
+          if (!overlap) {
+            rooms.push({x, y, w, h});
+            // 방 내부를 바닥으로 (다양한 타일)
+            let floorType = ['stone', 'dirt', 'grass'][Math.floor(Math.random() * 3)];
+            for (let ry = y; ry < y + h; ry++) {
+              for (let rx = x; rx < x + w; rx++) {
+                map[ry][rx] = '.';
+                floorTypes[ry][rx] = floorType;
+              }
+            }
+            break;
+          }
+          tries++;
+        }
+      }
+      
+      console.log(`[DEBUG] 생성된 방 개수: ${rooms.length}`);
+      
+      // 3. 방들을 복도로 연결
+      for (let i = 0; i < rooms.length - 1; i++) {
+        let r1 = rooms[i];
+        let r2 = rooms[i + 1];
+        let x1 = Math.floor(r1.x + r1.w / 2);
+        let y1 = Math.floor(r1.y + r1.h / 2);
+        let x2 = Math.floor(r2.x + r2.w / 2);
+        let y2 = Math.floor(r2.y + r2.h / 2);
+        
+        // L자 복도 생성
+        if (Math.random() < 0.5) {
+          // 가로 -> 세로
+          for (let x = Math.min(x1, x2); x <= Math.max(x1, x2); x++) {
+            if (x >= 0 && x < MAP_W && y1 >= 0 && y1 < MAP_H) {
+              map[y1][x] = '.';
+              floorTypes[y1][x] = 'stone';
+            }
+          }
+          for (let y = Math.min(y1, y2); y <= Math.max(y1, y2); y++) {
+            if (x2 >= 0 && x2 < MAP_W && y >= 0 && y < MAP_H) {
+              map[y][x2] = '.';
+              floorTypes[y][x2] = 'stone';
+            }
+          }
+        } else {
+          // 세로 -> 가로
+          for (let y = Math.min(y1, y2); y <= Math.max(y1, y2); y++) {
+            if (x1 >= 0 && x1 < MAP_W && y >= 0 && y < MAP_H) {
+              map[y][x1] = '.';
+              floorTypes[y][x1] = 'stone';
+            }
+          }
+          for (let x = Math.min(x1, x2); x <= Math.max(x1, x2); x++) {
+            if (x >= 0 && x < MAP_W && y2 >= 0 && y2 < MAP_H) {
+              map[y2][x] = '.';
+              floorTypes[y2][x] = 'stone';
+            }
+          }
+        }
+      }
+      
+      // 4. 물 웅덩이 추가 (랜덤)
+      for (let i = 0; i < 5; i++) {
+        let r = rooms[Math.floor(Math.random() * rooms.length)];
+        let wx = r.x + 1 + Math.floor(Math.random() * (r.w - 2));
+        let wy = r.y + 1 + Math.floor(Math.random() * (r.h - 2));
+        if (map[wy][wx] === '.') {
+          floorTypes[wy][wx] = 'water';
+        }
+      }
+      
+      // 5. 플레이어, 계단, 몬스터, 아이템 배치
+      let used = new Set();
+      
+      // 플레이어 (첫 번째 방)
+      if (rooms.length > 0) {
+        let r = rooms[0];
+        let px = r.x + 1 + Math.floor(Math.random() * (r.w - 2));
+        let py = r.y + 1 + Math.floor(Math.random() * (r.h - 2));
+        player.x = px; player.y = py;
+        visited[py][px] = true; // 시작 위치 방문 표시
+        used.add(`${px},${py}`);
+        console.log(`[DEBUG] 플레이어 위치: (${px},${py})`);
+      }
+      
+      // 계단 (마지막 방)
+      if (rooms.length > 1) {
+        let r = rooms[rooms.length - 1];
+        let sx = r.x + 1 + Math.floor(Math.random() * (r.w - 2));
+        let sy = r.y + 1 + Math.floor(Math.random() * (r.h - 2));
+        stairs.x = sx; stairs.y = sy;
+        map[sy][sx] = '>';
+        used.add(`${sx},${sy}`);
+        console.log(`[DEBUG] 계단 위치: (${sx},${sy})`);
+      }
+      
+      // 몬스터 (중간 방들) - 근접 몬스터와 원거리 몬스터 혼합
+      monsters = [];
+      for (let i = 1; i < Math.min(rooms.length - 1, 6); i++) {
+        let r = rooms[i];
+        let mx = r.x + 1 + Math.floor(Math.random() * (r.w - 2));
+        let my = r.y + 1 + Math.floor(Math.random() * (r.h - 2));
+        if (!used.has(`${mx},${my}`)) {
+          // 50% 확률로 원거리 몬스터(Archer)
+          let isArcher = Math.random() < 0.5;
+          monsters.push({
+            x: mx, y: my, 
+            hp: isArcher ? 4 : 5, 
+            atk: isArcher ? 3 : 2, 
+            alive: true,
+            type: isArcher ? 'archer' : 'melee',
+            reload: 0 // 재장전 턴 (원거리 몬스터용)
+          });
+          used.add(`${mx},${my}`);
+          console.log(`[DEBUG] ${isArcher ? '원거리' : '근접'} 몬스터 #${i} 위치: (${mx},${my})`);
+        }
+      }
+      
+      // 아이템 (랜덤 방들)
+      items = [];
+      for (let i = 0; i < 3; i++) {
+        let r = rooms[Math.floor(Math.random() * rooms.length)];
+        let ix = r.x + 1 + Math.floor(Math.random() * (r.w - 2));
+        let iy = r.y + 1 + Math.floor(Math.random() * (r.h - 2));
+        if (!used.has(`${ix},${iy}`)) {
+          items.push({x: ix, y: iy, type: 'potion'});
+          used.add(`${ix},${iy}`);
+          console.log(`[DEBUG] 아이템 #${i+1} 위치: (${ix},${iy})`);
+        }
+      }
+    }
+
+    // --- 맵/플레이어/몬스터/아이템 그리기 ---
+    function draw() {
+      const ctx = document.getElementById('game-canvas').getContext('2d');
+      ctx.clearRect(0,0,MAP_W*TILE,MAP_H*TILE);
+      
+      for (let y = 0; y < MAP_H; y++) {
+        for (let x = 0; x < MAP_W; x++) {
+          let ch = map[y][x];
+          let floorType = floorTypes[y][x];
+          let isVisited = visited[y][x];
+          let inVision = isInVision(x, y);
+          
+          // 시야 밖이고 방문하지 않은 곳은 어둡게
+          if (!inVision && !isVisited) {
+            ctx.fillStyle = '#111';
+            ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
+            continue;
+          }
+          
+          // 시야 밖이지만 방문한 곳은 어둡게 표시
+          if (!inVision && isVisited) {
+            ctx.fillStyle = '#222';
+            ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
+            ctx.font = 'bold 10px Consolas, monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#333';
+            if (ch === '#') {
+              ctx.fillText('#', x*TILE+TILE/2, y*TILE+TILE/2);
+            } else if (ch === '>') {
+              ctx.fillText('>', x*TILE+TILE/2, y*TILE+TILE/2);
+            } else {
+              ctx.fillText('.', x*TILE+TILE/2, y*TILE+TILE/2);
+            }
+            continue;
+          }
+          
+          // 시야 안의 타일 그리기
+          if (ch === '#') {
+            ctx.fillStyle = '#444';
+            ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
+            ctx.font = 'bold 13px Consolas, monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#888';
+            ctx.fillText('#', x*TILE+TILE/2, y*TILE+TILE/2);
+          } else if (ch === '>') {
+            ctx.fillStyle = '#2d1b69';
+            ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
+            ctx.font = 'bold 13px Consolas, monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#ffe066';
+            ctx.fillText('>', x*TILE+TILE/2, y*TILE+TILE/2);
+          } else {
+            // 바닥 타일 종류별 색상
+            let bgColor, textColor, symbol;
+            switch(floorType) {
+              case 'stone':
+                bgColor = '#3a3a3a';
+                textColor = '#666';
+                symbol = '·';
+                break;
+              case 'dirt':
+                bgColor = '#5d4e37';
+                textColor = '#8b7355';
+                symbol = '·';
+                break;
+              case 'grass':
+                bgColor = '#2d4a2d';
+                textColor = '#4a7c59';
+                symbol = '·';
+                break;
+              case 'water':
+                bgColor = '#1e3a8a';
+                textColor = '#3b82f6';
+                symbol = '~';
+                break;
+              default:
+                bgColor = '#222';
+                textColor = '#444';
+                symbol = '.';
+            }
+            
+            ctx.fillStyle = bgColor;
+            ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
+            ctx.font = 'bold 13px Consolas, monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = textColor;
+            ctx.fillText(symbol, x*TILE+TILE/2, y*TILE+TILE/2);
+          }
+        }
+      }
+      
+      // 아이템 (시야 안에만 표시)
+      for (let item of items) {
+        if (isInVision(item.x, item.y)) {
+          ctx.fillStyle = '#f87171';
+          ctx.font = 'bold 15px Consolas, monospace';
+          ctx.fillText('!', item.x*TILE+TILE/2, item.y*TILE+TILE/2);
+        }
+      }
+      
+      // 몬스터 (시야 안에만 표시)
+      for (let m of monsters) {
+        if (!m.alive) continue;
+        if (isInVision(m.x, m.y)) {
+          ctx.fillStyle = m.type === 'archer' ? '#ef4444' : '#facc15';
+          ctx.font = 'bold 15px Consolas, monospace';
+          ctx.fillText(m.type === 'archer' ? 'A' : 'M', m.x*TILE+TILE/2, m.y*TILE+TILE/2);
+        }
+      }
+      
+      // 플레이어
+      if (player.alive) {
+        ctx.fillStyle = '#4fd1c5';
+        ctx.font = 'bold 15px Consolas, monospace';
+        ctx.fillText('@', player.x*TILE+TILE/2, player.y*TILE+TILE/2);
+      }
+    }
+
+    // --- 플레이어 정보 표시 ---
+    function updatePlayerInfo() {
+      document.getElementById('player-info').innerHTML = `HP: <b>${player.hp}</b> / ${player.maxHp} | 공격력: <b>${player.atk}</b>`;
+      document.getElementById('vision-range').textContent = VISION_RANGE;
+    }
+
+    // --- 이동 처리 및 턴 진행 ---
+    function tryMove(dx, dy) {
+      if (!player.alive || gameOver) return;
+      let nx = player.x + dx, ny = player.y + dy;
+      if (nx < 0 || ny < 0 || nx >= MAP_W || ny >= MAP_H) return;
+      if (map[ny][nx] === '#') {
+        log('벽에 막혔습니다.');
+        return;
+      }
+      // 몬스터와 전투
+      let m = monsters.find(m => m.x === nx && m.y === ny && m.alive);
+      if (m) {
+        m.hp -= player.atk;
+        log(`몬스터에게 ${player.atk} 데미지! (남은 HP:${m.hp})`);
+        if (m.hp <= 0) {
+          m.alive = false;
+          log('몬스터를 처치했습니다!', 'win');
+        } else {
+          // 몬스터 반격
+          player.hp -= m.atk;
+          log(`몬스터의 반격! ${m.atk} 데미지! (내 HP:${player.hp})`, 'dead');
+        }
+        checkGameOver();
+        draw();
+        updatePlayerInfo();
+        return;
+      }
+      // 아이템 획득
+      let idx = items.findIndex(it => it.x === nx && it.y === ny);
+      if (idx !== -1) {
+        let it = items[idx];
+        if (it.type === 'potion') {
+          player.hp = Math.min(player.maxHp, player.hp+5);
+          log('HP포션을 먹고 HP 5 회복!', 'win');
+        }
+        items.splice(idx,1);
+      }
+      // 이동
+      player.x = nx; player.y = ny;
+      visited[ny][nx] = true; // 방문한 곳 표시
+      if (map[ny][nx] === '>') {
+        log('<b>계단에 도달! 승리!</b>', 'win');
+        gameOver = true;
+      } else {
+        log(`(${player.x},${player.y})로 이동.`);
+      }
+      // 몬스터 턴
+      monsterTurn();
+      draw();
+      updatePlayerInfo();
+      checkGameOver();
+    }
+
+    // --- 몬스터 턴 (근접/원거리 AI) ---
+    function monsterTurn() {
+      for (let m of monsters) {
+        if (!m.alive) continue;
+        
+        // 재장전 턴 처리
+        if (m.reload > 0) {
+          m.reload--;
+          continue;
+        }
+        
+        let dx = player.x - m.x, dy = player.y - m.y;
+        let dist = Math.abs(dx) + Math.abs(dy);
+        
+        if (m.type === 'archer') {
+          // 원거리 몬스터 (Archer) - 2-4칸 거리에서 공격
+          if (dist >= 2 && dist <= 4 && (dx === 0 || dy === 0)) {
+            // 4방향 직선 공격 가능한지 체크
+            let canAttack = true;
+            let tx = m.x, ty = m.y;
+            while (tx !== player.x || ty !== player.y) {
+              if (dx > 0) tx++;
+              else if (dx < 0) tx--;
+              else if (dy > 0) ty++;
+              else if (dy < 0) ty--;
+              
+              if (tx === player.x && ty === player.y) break;
+              if (map[ty][tx] === '#') {
+                canAttack = false;
+                break;
+              }
+            }
+            
+            if (canAttack) {
+              player.hp -= m.atk;
+              m.reload = 2; // 2턴 재장전
+              log(`원거리 몬스터가 화살을 쏩니다! ${m.atk} 데미지!`, 'dead');
+            }
+          } else if (dist > 4) {
+            // 플레이어 추적
+            let tx = m.x, ty = m.y;
+            if (Math.abs(dx) > Math.abs(dy)) tx += dx > 0 ? 1 : -1;
+            else ty += dy > 0 ? 1 : -1;
+            
+            if (tx !== player.x || ty !== player.y) {
+              if (tx >= 0 && ty >= 0 && tx < MAP_W && ty < MAP_H && map[ty][tx] === '.') {
+                if (!monsters.some(mm => mm !== m && mm.x === tx && mm.y === ty && mm.alive)) {
+                  m.x = tx; m.y = ty;
+                }
+              }
+            }
+          }
+        } else {
+          // 근접 몬스터 (기존 로직)
+          let tx = m.x, ty = m.y;
+          if (dist === 1) {
+            // 플레이어 공격
+            player.hp -= m.atk;
+            log('몬스터가 당신을 공격! ' + m.atk + ' 데미지!', 'dead');
+          } else if (dist <= 6 && Math.random() < 0.7) {
+            // 추적(가까우면)
+            if (Math.abs(dx) > Math.abs(dy)) tx += dx > 0 ? 1 : -1;
+            else ty += dy > 0 ? 1 : -1;
+          } else {
+            // 랜덤 이동
+            let dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+            let d = dirs[Math.floor(Math.random()*4)];
+            tx += d[0]; ty += d[1];
+          }
+          // 이동 가능 체크
+          if (tx === player.x && ty === player.y) continue;
+          if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) continue;
+          if (map[ty][tx] !== '.') continue;
+          if (monsters.some(mm => mm !== m && mm.x === tx && mm.y === ty && mm.alive)) continue;
+          m.x = tx; m.y = ty;
+        }
+      }
+    }
+
+    // --- 게임오버 체크 ---
+    function checkGameOver() {
+      if (player.hp <= 0 && player.alive) {
+        player.alive = false;
+        log('<b>당신은 쓰러졌습니다! (Game Over)</b>', 'dead');
+        gameOver = true;
+      }
+    }
+
+    // --- 키 입력 처리 ---
+    document.addEventListener('keydown', e => {
+      if (gameOver) return;
+      let key = e.key.toLowerCase();
+      if (key === 'arrowup' || key === 'w') tryMove(0,-1);
+      else if (key === 'arrowdown' || key === 's') tryMove(0,1);
+      else if (key === 'arrowleft' || key === 'a') tryMove(-1,0);
+      else if (key === 'arrowright' || key === 'd') tryMove(1,0);
+    });
+
+    // --- 초기화 ---
+    generateMap();
+    draw();
+    updatePlayerInfo();
+    log('게임 시작! 플레이어를 움직여 계단(>)을 찾아보세요.');
+  </script>
+</body>
+</html> 
