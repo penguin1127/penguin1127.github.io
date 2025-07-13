@@ -3,16 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Mini Rogue Game</title>
+  <title>이상한 던전 스타일 로그라이크</title>
   <style>
-    /*
-      [게임 화면 기본 레이아웃]
-      - #game-canvas: 던전 맵 및 캐릭터, 몬스터, 아이템 표시용 캔버스
-      - #info-panel: 플레이어 상태, 메시지, 조작법 안내 등 표시
-      - #log-panel: 게임 로그(이벤트, 전투 등) 표시
-    */
     body {
-      background: #181c1b;
+      background: #0a0a0a;
       color: #e0e0e0;
       font-family: 'Consolas', 'monospace', Arial, sans-serif;
       margin: 0;
@@ -21,16 +15,16 @@
       align-items: center;
       min-height: 100vh;
     }
-    h1 { margin: 18px 0 8px 0; }
+    h1 { margin: 18px 0 8px 0; color: #ffd700; }
     #game-canvas {
-      background: #232927;
+      background: #000;
       border: 2px solid #444;
       border-radius: 8px;
       margin-bottom: 12px;
       display: block;
     }
     #info-panel {
-      background: #232927;
+      background: #1a1a1a;
       border-radius: 8px;
       padding: 10px 18px;
       margin-bottom: 10px;
@@ -38,7 +32,7 @@
       font-size: 1.08rem;
     }
     #log-panel {
-      background: #1a1e1d;
+      background: #0f0f0f;
       border-radius: 8px;
       padding: 8px 14px;
       min-width: 320px;
@@ -60,55 +54,48 @@
       color: #ffe066;
       font-weight: bold;
     }
+    .warning {
+      color: #ffa500;
+      font-weight: bold;
+    }
+    .danger {
+      color: #ff4444;
+      font-weight: bold;
+      animation: blink 0.5s infinite;
+    }
+    @keyframes blink {
+      0%, 50% { opacity: 1; }
+      51%, 100% { opacity: 0.5; }
+    }
   </style>
 </head>
 <body>
-  <h1>Mini Rogue Game</h1>
+  <h1>이상한 던전 스타일 로그라이크</h1>
   <canvas id="game-canvas" width="600" height="420"></canvas>
   <div id="info-panel">
     <span id="player-info"></span>
     <div class="controls">
       이동: 방향키 또는 WASD &nbsp;|&nbsp; 목표: 계단(>) 도달<br>
       <b>@</b>: 플레이어, <b>M</b>: 근접몬스터, <b>A</b>: 원거리몬스터, <b>!</b>: HP포션<br>
-      <b>#</b>: 벽, <b>·</b>: 바닥(돌/흙/잔디), <b>~</b>: 물, <b>></b>: 계단 | 시야: <span id="vision-range"></span>칸
+      <b>#</b>: 벽, <b>·</b>: 바닥, <b>~</b>: 물, <b>^</b>: 함정, <b>></b>: 계단 | 시야: <span id="vision-range"></span>칸
     </div>
   </div>
   <div id="log-panel"></div>
   <script>
-    /*
-      [전체 구조 설계]
-      1. 맵(Map):
-        - 2차원 배열(타일 기반), 벽/바닥/문/계단 등
-        - 랜덤 던전 생성(방, 복도)
-      2. 플레이어(Player):
-        - 위치(x, y), HP, 공격력, 인벤토리(아이템)
-        - 키보드 입력(방향키/wasd)으로 이동
-      3. 몬스터(Monster):
-        - 위치(x, y), HP, 공격력, 간단한 AI(플레이어 추적/랜덤 이동)
-      4. 아이템(Item):
-        - 맵에 랜덤 배치, 획득/사용 가능(HP 회복, 공격력 증가 등)
-      5. 전투(Combat):
-        - 플레이어와 몬스터가 같은 칸에 있으면 전투 발생
-      6. 게임 오버/승리:
-        - HP 0이 되면 게임 오버, 계단 도달 시 승리
-      7. UI:
-        - 캔버스에 맵/캐릭터/몬스터/아이템 그리기
-        - info-panel: 상태/조작법, log-panel: 이벤트 로그
-      8. 엔진/프레임워크:
-        - rot.js(경량 로그라이크 엔진) 사용 가능(필요시 CDN)
-    */
     // --- 게임 상수 및 상태 ---
     const MAP_W = 40, MAP_H = 28, TILE = 15;
-    const VISION_RANGE = 6; // 시야 범위
+    const VISION_RANGE = 8; // 시야 범위
     let map = [];
     let floorTypes = []; // 바닥 타일 종류 저장
     let visited = []; // 플레이어가 방문한 곳
-    let player = { x: 0, y: 0, hp: 12, atk: 3, maxHp: 12, alive: true };
+    let player = { x: 0, y: 0, hp: 15, atk: 4, maxHp: 15, alive: true };
     let stairs = { x: 0, y: 0 };
     let monsters = [];
     let items = [];
+    let traps = []; // 함정
     let logLines = [];
     let gameOver = false;
+    let archerInRange = []; // 사거리 안의 원거리 몬스터
 
     // --- 로그 함수 ---
     function log(msg, cls) {
@@ -117,11 +104,68 @@
       document.getElementById('log-panel').innerHTML = logLines.map(l => `<div>${l}</div>`).join('');
     }
 
-    // --- 시야 계산 함수 ---
+    // --- 이상한 던전 스타일 시야 계산 (선형 시야) ---
+    function hasLineOfSight(x1, y1, x2, y2) {
+      let dx = Math.abs(x2 - x1);
+      let dy = Math.abs(y2 - y1);
+      let sx = x1 < x2 ? 1 : -1;
+      let sy = y1 < y2 ? 1 : -1;
+      let err = dx - dy;
+      
+      let x = x1, y = y1;
+      while (x !== x2 || y !== y2) {
+        if (map[y][x] === '#') return false;
+        let e2 = 2 * err;
+        if (e2 > -dy) {
+          err -= dy;
+          x += sx;
+        }
+        if (e2 < dx) {
+          err += dx;
+          y += sy;
+        }
+      }
+      return true;
+    }
+
     function isInVision(x, y) {
       let dx = Math.abs(x - player.x);
       let dy = Math.abs(y - player.y);
-      return dx <= VISION_RANGE && dy <= VISION_RANGE;
+      let dist = Math.max(dx, dy);
+      return dist <= VISION_RANGE && hasLineOfSight(player.x, player.y, x, y);
+    }
+
+    // --- 타일 효과 함수들 ---
+    function applyTileEffect(x, y) {
+      let floorType = floorTypes[y][x];
+      switch(floorType) {
+        case 'water':
+          log('물을 건너며 속도가 느려집니다...', 'warning');
+          return 2; // 2턴 소모
+        case 'trap':
+          if (!visited[y][x]) {
+            player.hp -= 3;
+            log('함정에 걸렸습니다! 3 데미지!', 'dead');
+            visited[y][x] = true;
+          }
+          return 1;
+        case 'heal':
+          if (!visited[y][x]) {
+            player.hp = Math.min(player.maxHp, player.hp + 2);
+            log('치유의 바닥에서 HP 2 회복!', 'win');
+            visited[y][x] = true;
+          }
+          return 1;
+        case 'poison':
+          if (!visited[y][x]) {
+            player.hp -= 2;
+            log('독 바닥에 걸렸습니다! 2 데미지!', 'dead');
+            visited[y][x] = true;
+          }
+          return 1;
+        default:
+          return 1;
+      }
     }
 
     // --- 순수 JavaScript 던전 생성 ---
@@ -138,11 +182,11 @@
       
       // 2. 랜덤 방 생성
       let rooms = [];
-      for (let i = 0; i < 8; i++) {
+      for (let i = 0; i < 10; i++) {
         let tries = 0;
         while (tries < 50) {
-          let w = 6 + Math.floor(Math.random() * 6); // 6-11
-          let h = 5 + Math.floor(Math.random() * 4); // 5-8
+          let w = 5 + Math.floor(Math.random() * 8); // 5-12
+          let h = 4 + Math.floor(Math.random() * 6); // 4-9
           let x = 2 + Math.floor(Math.random() * (MAP_W - w - 4));
           let y = 2 + Math.floor(Math.random() * (MAP_H - h - 4));
           
@@ -158,7 +202,7 @@
           if (!overlap) {
             rooms.push({x, y, w, h});
             // 방 내부를 바닥으로 (다양한 타일)
-            let floorType = ['stone', 'dirt', 'grass'][Math.floor(Math.random() * 3)];
+            let floorType = ['stone', 'dirt', 'grass', 'heal'][Math.floor(Math.random() * 4)];
             for (let ry = y; ry < y + h; ry++) {
               for (let rx = x; rx < x + w; rx++) {
                 map[ry][rx] = '.';
@@ -214,13 +258,34 @@
         }
       }
       
-      // 4. 물 웅덩이 추가 (랜덤)
-      for (let i = 0; i < 5; i++) {
+      // 4. 특수 타일 추가
+      // 물 웅덩이
+      for (let i = 0; i < 8; i++) {
         let r = rooms[Math.floor(Math.random() * rooms.length)];
         let wx = r.x + 1 + Math.floor(Math.random() * (r.w - 2));
         let wy = r.y + 1 + Math.floor(Math.random() * (r.h - 2));
         if (map[wy][wx] === '.') {
           floorTypes[wy][wx] = 'water';
+        }
+      }
+      
+      // 함정
+      for (let i = 0; i < 6; i++) {
+        let r = rooms[Math.floor(Math.random() * rooms.length)];
+        let tx = r.x + 1 + Math.floor(Math.random() * (r.w - 2));
+        let ty = r.y + 1 + Math.floor(Math.random() * (r.h - 2));
+        if (map[ty][tx] === '.') {
+          floorTypes[ty][tx] = 'trap';
+        }
+      }
+      
+      // 독 바닥
+      for (let i = 0; i < 4; i++) {
+        let r = rooms[Math.floor(Math.random() * rooms.length)];
+        let px = r.x + 1 + Math.floor(Math.random() * (r.w - 2));
+        let py = r.y + 1 + Math.floor(Math.random() * (r.h - 2));
+        if (map[py][px] === '.') {
+          floorTypes[py][px] = 'poison';
         }
       }
       
@@ -233,7 +298,7 @@
         let px = r.x + 1 + Math.floor(Math.random() * (r.w - 2));
         let py = r.y + 1 + Math.floor(Math.random() * (r.h - 2));
         player.x = px; player.y = py;
-        visited[py][px] = true; // 시작 위치 방문 표시
+        visited[py][px] = true;
         used.add(`${px},${py}`);
         console.log(`[DEBUG] 플레이어 위치: (${px},${py})`);
       }
@@ -251,20 +316,22 @@
       
       // 몬스터 (중간 방들) - 근접 몬스터와 원거리 몬스터 혼합
       monsters = [];
-      for (let i = 1; i < Math.min(rooms.length - 1, 6); i++) {
+      for (let i = 1; i < Math.min(rooms.length - 1, 8); i++) {
         let r = rooms[i];
         let mx = r.x + 1 + Math.floor(Math.random() * (r.w - 2));
         let my = r.y + 1 + Math.floor(Math.random() * (r.h - 2));
         if (!used.has(`${mx},${my}`)) {
-          // 50% 확률로 원거리 몬스터(Archer)
-          let isArcher = Math.random() < 0.5;
+          // 60% 확률로 원거리 몬스터(Archer)
+          let isArcher = Math.random() < 0.6;
           monsters.push({
             x: mx, y: my, 
-            hp: isArcher ? 4 : 5, 
-            atk: isArcher ? 3 : 2, 
+            hp: isArcher ? 6 : 8, 
+            atk: isArcher ? 4 : 3, 
             alive: true,
             type: isArcher ? 'archer' : 'melee',
-            reload: 0 // 재장전 턴 (원거리 몬스터용)
+            reload: 0,
+            range: isArcher ? 4 : 1, // 사거리
+            inRange: false // 사거리 안에 있는지
           });
           used.add(`${mx},${my}`);
           console.log(`[DEBUG] ${isArcher ? '원거리' : '근접'} 몬스터 #${i} 위치: (${mx},${my})`);
@@ -273,7 +340,7 @@
       
       // 아이템 (랜덤 방들)
       items = [];
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 5; i++) {
         let r = rooms[Math.floor(Math.random() * rooms.length)];
         let ix = r.x + 1 + Math.floor(Math.random() * (r.w - 2));
         let iy = r.y + 1 + Math.floor(Math.random() * (r.h - 2));
@@ -297,21 +364,21 @@
           let isVisited = visited[y][x];
           let inVision = isInVision(x, y);
           
-          // 시야 밖이고 방문하지 않은 곳은 어둡게
+          // 시야 밖이고 방문하지 않은 곳은 완전히 어둡게
           if (!inVision && !isVisited) {
-            ctx.fillStyle = '#111';
+            ctx.fillStyle = '#000';
             ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
             continue;
           }
           
-          // 시야 밖이지만 방문한 곳은 어둡게 표시
+          // 시야 밖이지만 방문한 곳은 매우 어둡게 표시
           if (!inVision && isVisited) {
-            ctx.fillStyle = '#222';
+            ctx.fillStyle = '#111';
             ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
-            ctx.font = 'bold 10px Consolas, monospace';
+            ctx.font = 'bold 8px Consolas, monospace';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillStyle = '#333';
+            ctx.fillStyle = '#222';
             if (ch === '#') {
               ctx.fillText('#', x*TILE+TILE/2, y*TILE+TILE/2);
             } else if (ch === '>') {
@@ -324,12 +391,12 @@
           
           // 시야 안의 타일 그리기
           if (ch === '#') {
-            ctx.fillStyle = '#444';
+            ctx.fillStyle = '#333';
             ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
             ctx.font = 'bold 13px Consolas, monospace';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillStyle = '#888';
+            ctx.fillStyle = '#666';
             ctx.fillText('#', x*TILE+TILE/2, y*TILE+TILE/2);
           } else if (ch === '>') {
             ctx.fillStyle = '#2d1b69';
@@ -344,28 +411,43 @@
             let bgColor, textColor, symbol;
             switch(floorType) {
               case 'stone':
-                bgColor = '#3a3a3a';
-                textColor = '#666';
+                bgColor = '#2a2a2a';
+                textColor = '#555';
                 symbol = '·';
                 break;
               case 'dirt':
-                bgColor = '#5d4e37';
-                textColor = '#8b7355';
+                bgColor = '#4a3a2a';
+                textColor = '#7a5a3a';
                 symbol = '·';
                 break;
               case 'grass':
-                bgColor = '#2d4a2d';
-                textColor = '#4a7c59';
+                bgColor = '#1a3a1a';
+                textColor = '#3a5a3a';
                 symbol = '·';
                 break;
               case 'water':
-                bgColor = '#1e3a8a';
-                textColor = '#3b82f6';
+                bgColor = '#1a2a4a';
+                textColor = '#3a5a8a';
                 symbol = '~';
                 break;
+              case 'trap':
+                bgColor = '#4a2a2a';
+                textColor = '#8a3a3a';
+                symbol = '^';
+                break;
+              case 'heal':
+                bgColor = '#2a4a2a';
+                textColor = '#5a8a5a';
+                symbol = '·';
+                break;
+              case 'poison':
+                bgColor = '#4a2a4a';
+                textColor = '#8a3a8a';
+                symbol = '·';
+                break;
               default:
-                bgColor = '#222';
-                textColor = '#444';
+                bgColor = '#1a1a1a';
+                textColor = '#333';
                 symbol = '.';
             }
             
@@ -393,7 +475,11 @@
       for (let m of monsters) {
         if (!m.alive) continue;
         if (isInVision(m.x, m.y)) {
-          ctx.fillStyle = m.type === 'archer' ? '#ef4444' : '#facc15';
+          let color = m.type === 'archer' ? '#ef4444' : '#facc15';
+          if (m.type === 'archer' && m.inRange) {
+            color = '#ff0000'; // 사거리 안이면 빨간색으로 강조
+          }
+          ctx.fillStyle = color;
           ctx.font = 'bold 15px Consolas, monospace';
           ctx.fillText(m.type === 'archer' ? 'A' : 'M', m.x*TILE+TILE/2, m.y*TILE+TILE/2);
         }
@@ -413,6 +499,29 @@
       document.getElementById('vision-range').textContent = VISION_RANGE;
     }
 
+    // --- 원거리 몬스터 사거리 체크 ---
+    function checkArcherRange() {
+      archerInRange = [];
+      for (let m of monsters) {
+        if (!m.alive || m.type !== 'archer') continue;
+        
+        let dx = Math.abs(player.x - m.x);
+        let dy = Math.abs(player.y - m.y);
+        let dist = Math.max(dx, dy);
+        
+        if (dist <= m.range && hasLineOfSight(m.x, m.y, player.x, player.y)) {
+          m.inRange = true;
+          archerInRange.push(m);
+        } else {
+          m.inRange = false;
+        }
+      }
+      
+      if (archerInRange.length > 0) {
+        log(`원거리 몬스터의 사거리 안에 있습니다! (${archerInRange.length}마리)`, 'danger');
+      }
+    }
+
     // --- 이동 처리 및 턴 진행 ---
     function tryMove(dx, dy) {
       if (!player.alive || gameOver) return;
@@ -422,9 +531,15 @@
         log('벽에 막혔습니다.');
         return;
       }
+      
       // 몬스터와 전투
       let m = monsters.find(m => m.x === nx && m.y === ny && m.alive);
       if (m) {
+        if (m.type === 'archer') {
+          log('원거리 몬스터와 근접 전투는 불가능합니다!', 'warning');
+          return;
+        }
+        
         m.hp -= player.atk;
         log(`몬스터에게 ${player.atk} 데미지! (남은 HP:${m.hp})`);
         if (m.hp <= 0) {
@@ -440,25 +555,35 @@
         updatePlayerInfo();
         return;
       }
+      
       // 아이템 획득
       let idx = items.findIndex(it => it.x === nx && it.y === ny);
       if (idx !== -1) {
         let it = items[idx];
         if (it.type === 'potion') {
-          player.hp = Math.min(player.maxHp, player.hp+5);
-          log('HP포션을 먹고 HP 5 회복!', 'win');
+          player.hp = Math.min(player.maxHp, player.hp+8);
+          log('HP포션을 먹고 HP 8 회복!', 'win');
         }
         items.splice(idx,1);
       }
+      
       // 이동
       player.x = nx; player.y = ny;
-      visited[ny][nx] = true; // 방문한 곳 표시
+      visited[ny][nx] = true;
+      
+      // 타일 효과 적용
+      let turnCost = applyTileEffect(nx, ny);
+      
       if (map[ny][nx] === '>') {
         log('<b>계단에 도달! 승리!</b>', 'win');
         gameOver = true;
       } else {
         log(`(${player.x},${player.y})로 이동.`);
       }
+      
+      // 원거리 몬스터 사거리 체크
+      checkArcherRange();
+      
       // 몬스터 턴
       monsterTurn();
       draw();
@@ -478,34 +603,16 @@
         }
         
         let dx = player.x - m.x, dy = player.y - m.y;
-        let dist = Math.abs(dx) + Math.abs(dy);
+        let dist = Math.max(Math.abs(dx), Math.abs(dy));
         
         if (m.type === 'archer') {
-          // 원거리 몬스터 (Archer) - 2-4칸 거리에서 공격
-          if (dist >= 2 && dist <= 4 && (dx === 0 || dy === 0)) {
-            // 4방향 직선 공격 가능한지 체크
-            let canAttack = true;
-            let tx = m.x, ty = m.y;
-            while (tx !== player.x || ty !== player.y) {
-              if (dx > 0) tx++;
-              else if (dx < 0) tx--;
-              else if (dy > 0) ty++;
-              else if (dy < 0) ty--;
-              
-              if (tx === player.x && ty === player.y) break;
-              if (map[ty][tx] === '#') {
-                canAttack = false;
-                break;
-              }
-            }
-            
-            if (canAttack) {
-              player.hp -= m.atk;
-              m.reload = 2; // 2턴 재장전
-              log(`원거리 몬스터가 화살을 쏩니다! ${m.atk} 데미지!`, 'dead');
-            }
-          } else if (dist > 4) {
-            // 플레이어 추적
+          // 원거리 몬스터 - 사거리 안에 있으면 공격
+          if (m.inRange && hasLineOfSight(m.x, m.y, player.x, player.y)) {
+            player.hp -= m.atk;
+            m.reload = 3; // 3턴 재장전
+            log(`원거리 몬스터가 화살을 쏩니다! ${m.atk} 데미지!`, 'dead');
+          } else if (dist > m.range) {
+            // 플레이어 추적 (사거리 밖에서)
             let tx = m.x, ty = m.y;
             if (Math.abs(dx) > Math.abs(dy)) tx += dx > 0 ? 1 : -1;
             else ty += dy > 0 ? 1 : -1;
@@ -566,9 +673,10 @@
 
     // --- 초기화 ---
     generateMap();
+    checkArcherRange();
     draw();
     updatePlayerInfo();
-    log('게임 시작! 플레이어를 움직여 계단(>)을 찾아보세요.');
+    log('게임 시작! 이상한 던전 스타일의 시야 시스템을 경험해보세요.');
   </script>
 </body>
 </html> 
